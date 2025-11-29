@@ -1,11 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { BattleScene } from './components/BattleScene';
 import { UI } from './components/UI';
-import { GamePhase, Team, TerrainType, UnitInstance } from './types';
+import { GamePhase, Team, TerrainType } from './types';
 import { INITIAL_BUDGET } from './constants';
 
 const App: React.FC = () => {
+  const [gameKey, setGameKey] = useState(0); // Used to force full reset of BattleScene
   const [phase, setPhase] = useState<GamePhase>(GamePhase.SETUP);
   const [terrain, setTerrain] = useState<TerrainType>(TerrainType.GRASS);
   
@@ -18,31 +19,30 @@ const App: React.FC = () => {
     [Team.RED]: INITIAL_BUDGET,
     [Team.BLUE]: INITIAL_BUDGET
   });
-  const [units, setUnits] = useState<UnitInstance[]>([]);
   const [winner, setWinner] = useState<Team | null>(null);
 
-  const handleStartBattle = () => {
-    // Check if both teams have units
-    const hasRed = units.some(u => u.team === Team.RED);
-    const hasBlue = units.some(u => u.team === Team.BLUE);
+  // Status Check (Managed via callback from BattleScene)
+  const [teamStatus, setTeamStatus] = useState({ red: false, blue: false });
 
-    if (!hasRed || !hasBlue) {
+  const handleStartBattle = () => {
+    if (!teamStatus.red || !teamStatus.blue) {
       alert("Both teams must have at least one unit to start!");
       return;
     }
-
     setSelectedTemplateId(null);
     setPhase(GamePhase.BATTLE);
   };
 
   const handleReset = () => {
+    // Incrementing key forces BattleScene to remount, clearing internal unit state
+    setGameKey(k => k + 1); 
     setPhase(GamePhase.SETUP);
-    setUnits([]);
     setBudgets({
       [Team.RED]: INITIAL_BUDGET,
       [Team.BLUE]: INITIAL_BUDGET
     });
     setWinner(null);
+    setTeamStatus({ red: false, blue: false });
   };
 
   const decreaseBudget = (amount: number) => {
@@ -52,14 +52,18 @@ const App: React.FC = () => {
     }));
   };
 
+  // Callback to receive updates from BattleScene without constantly re-rendering App for positions
+  const onTeamStatusChange = useCallback((hasRed: boolean, hasBlue: boolean) => {
+    setTeamStatus({ red: hasRed, blue: hasBlue });
+  }, []);
+
   return (
     <div className="w-full h-screen relative bg-slate-900 overflow-hidden">
       {/* 3D Scene Layer */}
       <div className="absolute inset-0 z-0">
         <Canvas shadows camera={{ position: [0, 20, 30], fov: 50 }}>
           <BattleScene
-            units={units}
-            setUnits={setUnits}
+            key={gameKey} // Force reset when gameKey changes
             phase={phase}
             setPhase={setPhase}
             terrain={terrain}
@@ -68,6 +72,7 @@ const App: React.FC = () => {
             budgets={budgets}
             decreaseBudget={decreaseBudget}
             setWinner={setWinner}
+            onTeamStatusChange={onTeamStatusChange}
           />
         </Canvas>
       </div>

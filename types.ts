@@ -37,6 +37,7 @@ export interface UnitTemplate {
   name: string;
   stats: Omit<UnitStats, 'hp'>; // Base stats without current hp
   cost: number;
+  fixedCost?: number; // Override calculated cost
   attackType: AttackType;
   color: string;
   height: number;

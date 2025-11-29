@@ -12,12 +12,13 @@ export const TERRAIN_CONFIG = {
 
 // Cost calculation formula
 const calculateCost = (hp: number, atk: number, def: number): number => {
-  // Stats are 10x higher now, so we divide by a larger number to keep costs in 10-3000 range
   const rawScore = (hp * 0.2) + (atk * 2.5) + (def * 1.5);
   return Math.floor(Math.min(3000, Math.max(50, rawScore / 10)));
 };
 
-export const UNIT_TEMPLATES: UnitTemplate[] = [
+type TemplateDefinition = Omit<UnitTemplate, 'cost'> & { fixedCost?: number };
+
+const definitions: TemplateDefinition[] = [
   {
     id: 'foot_soldier',
     name: 'Tactical Trooper',
@@ -26,7 +27,6 @@ export const UNIT_TEMPLATES: UnitTemplate[] = [
     color: '#94a3b8',
     height: 1.5,
     width: 0.8,
-    cost: 0, 
   },
   {
     id: 'heavy_tank',
@@ -36,7 +36,6 @@ export const UNIT_TEMPLATES: UnitTemplate[] = [
     color: '#334155',
     height: 2.5,
     width: 2,
-    cost: 0,
   },
   {
     id: 'berserker',
@@ -46,7 +45,6 @@ export const UNIT_TEMPLATES: UnitTemplate[] = [
     color: '#ef4444',
     height: 1.6,
     width: 1,
-    cost: 0,
   },
   {
     id: 'paladin',
@@ -56,7 +54,6 @@ export const UNIT_TEMPLATES: UnitTemplate[] = [
     color: '#facc15',
     height: 1.9,
     width: 1.2,
-    cost: 0,
   },
   {
     id: 'dark_mage',
@@ -66,7 +63,6 @@ export const UNIT_TEMPLATES: UnitTemplate[] = [
     color: '#7e22ce',
     height: 1.4,
     width: 0.7,
-    cost: 0,
   },
   {
     id: 'sniper',
@@ -76,9 +72,41 @@ export const UNIT_TEMPLATES: UnitTemplate[] = [
     color: '#166534',
     height: 1.6,
     width: 0.6,
-    cost: 0,
+  },
+  // --- NEW UNITS ---
+  {
+    id: 'grim_reaper',
+    name: 'Grim Reaper',
+    stats: { maxHp: 30000, atk: 10000, def: 1500, range: 2.5, attackSpeed: 0.5, moveSpeed: 4 },
+    attackType: AttackType.DARK_MAGIC,
+    color: '#000000',
+    height: 2.5,
+    width: 1.2,
+    fixedCost: 4000
+  },
+  {
+    id: 'knight',
+    name: 'Grand Knight',
+    stats: { maxHp: 20000, atk: 8000, def: 2000, range: 3, attackSpeed: 0.8, moveSpeed: 7 },
+    attackType: AttackType.PHYSICAL,
+    color: '#9ca3af',
+    height: 2.2,
+    width: 1.5,
+    fixedCost: 3800
+  },
+  {
+    id: 'superman',
+    name: 'Man of Steel',
+    stats: { maxHp: 60000, atk: 15000, def: 1800, range: 15, attackSpeed: 2, moveSpeed: 8 },
+    attackType: AttackType.LIGHT_MAGIC,
+    color: '#3b82f6',
+    height: 2.0,
+    width: 1.0,
+    fixedCost: 5000
   }
-].map(u => ({
+];
+
+export const UNIT_TEMPLATES: UnitTemplate[] = definitions.map(u => ({
   ...u,
-  cost: calculateCost(u.stats.maxHp, u.stats.atk, u.stats.def)
+  cost: u.fixedCost !== undefined ? u.fixedCost : calculateCost(u.stats.maxHp, u.stats.atk, u.stats.def)
 }));

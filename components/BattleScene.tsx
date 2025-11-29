@@ -1,8 +1,8 @@
-import React, { useRef, useMemo, useState, useEffect } from 'react';
-import { Canvas, useFrame, ThreeEvent } from '@react-three/fiber';
-import { OrbitControls, Environment, SoftShadows, ContactShadows, Text, Float, Trail, Stars, Sky } from '@react-three/drei';
+import React, { useRef, useMemo, useState, useEffect, useLayoutEffect } from 'react';
+import { useFrame, ThreeEvent } from '@react-three/fiber';
+import { OrbitControls, Environment, Float, Trail, Stars, Sky } from '@react-three/drei';
 import * as THREE from 'three';
-import { UnitInstance, UnitTemplate, Team, GamePhase, TerrainType, AttackType } from '../types';
+import { UnitInstance, Team, GamePhase, TerrainType } from '../types';
 import { UNIT_TEMPLATES, ARENA_SIZE, TERRAIN_CONFIG } from '../constants';
 
 declare global {
@@ -26,6 +26,11 @@ declare global {
       torusGeometry: any;
       lineBasicMaterial: any;
       fog: any;
+      points: any;
+      bufferGeometry: any;
+      pointsMaterial: any;
+      bufferAttribute: any;
+      pointLight: any;
     }
   }
 }
@@ -37,51 +42,91 @@ const getDistance = (p1: [number, number, number], p2: [number, number, number])
   return Math.sqrt(Math.pow(p1[0] - p2[0], 2) + Math.pow(p1[2] - p2[2], 2));
 };
 
-// --- Visual Components ---
+// --- TERRAIN GENERATION SYSTEM ---
+const getTerrainHeight = (x: number, z: number, type: TerrainType): number => {
+    switch (type) {
+        case TerrainType.GRASS:
+            // Rolling hills
+            return Math.sin(x * 0.1) * Math.cos(z * 0.1) * 2 + Math.sin(x * 0.3 + z * 0.2) * 0.5;
+        case TerrainType.DESERT:
+             // Dunes
+             return Math.sin(x * 0.05 + z * 0.1) * 3 + Math.sin(z * 0.2) * 1; 
+        case TerrainType.VOLCANIC:
+             // Jagged spikes and crater-like depression
+             const r = Math.sqrt(x*x + z*z);
+             const crater = Math.max(0, 5 - r * 0.2); 
+             return Math.abs(Math.sin(x * 0.15) * Math.cos(z * 0.15)) * 4 - crater; 
+        case TerrainType.SNOW:
+             // Smooth mounds
+             return Math.cos(x * 0.08) * 2 + Math.sin(z * 0.08) * 2 + Math.random() * 0.1;
+        default:
+            return 0;
+    }
+};
 
-// 1. UNIT MODELS - Specialized geometry for each character class
+const GroundMesh = ({ terrain }: { terrain: TerrainType }) => {
+    const meshRef = useRef<THREE.Mesh>(null);
+    const config = TERRAIN_CONFIG[terrain];
+
+    useLayoutEffect(() => {
+        if (!meshRef.current) return;
+        
+        const geometry = meshRef.current.geometry;
+        const posAttribute = geometry.attributes.position;
+        const vertex = new THREE.Vector3();
+
+        for (let i = 0; i < posAttribute.count; i++) {
+            vertex.fromBufferAttribute(posAttribute, i);
+            // In PlaneGeometry, z is 0 initially. We rotate -PI/2 X later.
+            // We apply height map logic to the Z coordinate of the geometry.
+            const height = getTerrainHeight(vertex.x, -vertex.y, terrain); 
+            posAttribute.setZ(i, height);
+        }
+
+        posAttribute.needsUpdate = true;
+        geometry.computeVertexNormals();
+
+    }, [terrain]);
+
+    return (
+        <mesh ref={meshRef} rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.05, 0]} receiveShadow>
+            <planeGeometry args={[ARENA_SIZE * 2, ARENA_SIZE * 2, 64, 64]} />
+            <meshStandardMaterial color={config.groundColor} roughness={0.9} metalness={0.1} />
+        </mesh>
+    );
+};
+
+
+// --- VISUAL COMPONENTS ---
+
+// 1. UNIT MODELS
 const TrooperModel = ({ color }: { color: string }) => (
     <group>
-        {/* Body */}
         <mesh position={[0, 0.75, 0]} castShadow>
             <boxGeometry args={[0.6, 0.8, 0.4]} />
             <meshStandardMaterial color={color} roughness={0.8} />
         </mesh>
-        {/* Head */}
         <mesh position={[0, 1.3, 0]} castShadow>
             <boxGeometry args={[0.3, 0.3, 0.35]} />
             <meshStandardMaterial color="#333" />
         </mesh>
-        {/* Gun */}
         <mesh position={[0.4, 0.9, 0.4]} rotation={[0, 0, 0]} castShadow>
             <boxGeometry args={[0.1, 0.1, 0.8]} />
             <meshStandardMaterial color="#111" />
-        </mesh>
-        {/* Legs */}
-        <mesh position={[-0.2, 0.2, 0]} castShadow>
-             <boxGeometry args={[0.15, 0.4, 0.2]} />
-             <meshStandardMaterial color="#222" />
-        </mesh>
-        <mesh position={[0.2, 0.2, 0]} castShadow>
-             <boxGeometry args={[0.15, 0.4, 0.2]} />
-             <meshStandardMaterial color="#222" />
         </mesh>
     </group>
 );
 
 const MechModel = ({ color }: { color: string }) => (
     <group>
-        {/* Main Hull */}
         <mesh position={[0, 1.2, 0]} castShadow>
             <boxGeometry args={[1.2, 1, 1.2]} />
             <meshStandardMaterial color={color} metalness={0.8} roughness={0.2} />
         </mesh>
-        {/* Cockpit */}
         <mesh position={[0, 1.4, 0.5]}>
             <boxGeometry args={[0.8, 0.4, 0.4]} />
             <meshStandardMaterial color="#0ea5e9" emissive="#0ea5e9" emissiveIntensity={0.5} />
         </mesh>
-        {/* Missile Pods (Shoulders) */}
         <mesh position={[-0.8, 1.5, -0.2]} castShadow>
             <boxGeometry args={[0.4, 0.6, 0.8]} />
             <meshStandardMaterial color="#333" />
@@ -90,50 +135,20 @@ const MechModel = ({ color }: { color: string }) => (
             <boxGeometry args={[0.4, 0.6, 0.8]} />
             <meshStandardMaterial color="#333" />
         </mesh>
-        {/* Legs */}
-        <mesh position={[-0.5, 0.3, 0]} rotation={[0, 0, -0.2]} castShadow>
-             <boxGeometry args={[0.4, 0.8, 0.6]} />
-             <meshStandardMaterial color="#222" />
-        </mesh>
-        <mesh position={[0.5, 0.3, 0]} rotation={[0, 0, 0.2]} castShadow>
-             <boxGeometry args={[0.4, 0.8, 0.6]} />
-             <meshStandardMaterial color="#222" />
-        </mesh>
     </group>
 );
 
 const BerserkerModel = ({ color }: { color: string }) => (
     <group>
-        {/* Body */}
         <mesh position={[0, 0.8, 0]} castShadow>
             <coneGeometry args={[0.5, 1, 4]} />
             <meshStandardMaterial color={color} />
         </mesh>
-        {/* Head with Horns */}
         <mesh position={[0, 1.4, 0]}>
             <dodecahedronGeometry args={[0.25]} />
             <meshStandardMaterial color="#444" />
         </mesh>
-        <mesh position={[0.2, 1.55, 0]} rotation={[0,0,-0.5]}>
-            <coneGeometry args={[0.05, 0.3]} />
-            <meshStandardMaterial color="white" />
-        </mesh>
-        <mesh position={[-0.2, 1.55, 0]} rotation={[0,0,0.5]}>
-            <coneGeometry args={[0.05, 0.3]} />
-            <meshStandardMaterial color="white" />
-        </mesh>
-        {/* Axes */}
         <group position={[0.5, 0.8, 0.3]} rotation={[0.5, 0.5, 0]}>
-            <mesh position={[0, 0.3, 0]}>
-                <boxGeometry args={[0.1, 0.8, 0.1]} />
-                <meshStandardMaterial color="#5c4033" />
-            </mesh>
-            <mesh position={[0, 0.7, 0]}>
-                 <boxGeometry args={[0.4, 0.3, 0.05]} />
-                 <meshStandardMaterial color="#ccc" metalness={0.8} />
-            </mesh>
-        </group>
-         <group position={[-0.5, 0.8, 0.3]} rotation={[0.5, -0.5, 0]}>
             <mesh position={[0, 0.3, 0]}>
                 <boxGeometry args={[0.1, 0.8, 0.1]} />
                 <meshStandardMaterial color="#5c4033" />
@@ -148,45 +163,31 @@ const BerserkerModel = ({ color }: { color: string }) => (
 
 const PaladinModel = ({ color }: { color: string }) => (
     <group>
-        {/* Armor */}
         <mesh position={[0, 0.9, 0]} castShadow>
             <cylinderGeometry args={[0.4, 0.3, 1, 6]} />
             <meshStandardMaterial color="#fbbf24" metalness={0.6} roughness={0.3} />
         </mesh>
-        {/* Head/Helm */}
         <mesh position={[0, 1.5, 0]}>
             <boxGeometry args={[0.3, 0.4, 0.3]} />
             <meshStandardMaterial color="#fbbf24" metalness={0.8} />
         </mesh>
-        {/* Shield */}
         <mesh position={[0.4, 0.9, 0.3]} rotation={[0, -0.4, 0]} castShadow>
             <boxGeometry args={[0.1, 0.8, 0.6]} />
             <meshStandardMaterial color="white" emissive="white" emissiveIntensity={0.2} />
-        </mesh>
-        <mesh position={[0.4, 0.9, 0.35]}>
-             <boxGeometry args={[0.12, 0.4, 0.3]} />
-             <meshStandardMaterial color="#f59e0b" />
         </mesh>
     </group>
 );
 
 const MageModel = ({ color }: { color: string }) => (
     <group>
-        {/* Robes */}
         <mesh position={[0, 0.6, 0]} castShadow>
             <coneGeometry args={[0.5, 1.2, 8, 1, true]} />
             <meshStandardMaterial color={color} side={THREE.DoubleSide} />
         </mesh>
-        {/* Floating Head */}
         <mesh position={[0, 1.3, 0]}>
-            <sphereGeometry args={[0.2]} />
-            <meshStandardMaterial color="#000" />
-        </mesh>
-        <mesh position={[0, 1.3, 0]}>
-             <sphereGeometry args={[0.15]} />
+             <sphereGeometry args={[0.15, 8, 8]} />
              <meshStandardMaterial color="#a855f7" emissive="#a855f7" emissiveIntensity={1} wireframe />
         </mesh>
-        {/* Floating Orbs */}
         <Float speed={4} rotationIntensity={2} floatIntensity={1}>
             <mesh position={[0.5, 1, 0]}>
                 <dodecahedronGeometry args={[0.1]} />
@@ -198,29 +199,168 @@ const MageModel = ({ color }: { color: string }) => (
 
 const SniperModel = ({ color }: { color: string }) => (
     <group>
-        {/* Ghillie Suit Body */}
         <mesh position={[0, 0.6, 0]} castShadow>
             <cylinderGeometry args={[0.2, 0.3, 1.2, 5]} />
             <meshStandardMaterial color="#3f6212" roughness={1} />
         </mesh>
-        {/* Hood */}
         <mesh position={[0, 1.3, 0]}>
-            <sphereGeometry args={[0.25]} />
+            <sphereGeometry args={[0.25, 8, 8]} />
             <meshStandardMaterial color="#3f6212" roughness={1} />
         </mesh>
-        {/* Long Rifle */}
         <group position={[0.2, 1, 0.4]} rotation={[0, 0, -0.2]}>
             <mesh rotation={[Math.PI/2, 0, 0]}>
-                <cylinderGeometry args={[0.03, 0.04, 1.4]} />
+                <cylinderGeometry args={[0.03, 0.04, 1.4, 4]} />
                 <meshStandardMaterial color="black" />
             </mesh>
         </group>
     </group>
 );
 
+const GrimReaperModel = () => {
+    const group = useRef<THREE.Group>(null);
+    useFrame((state) => {
+        if (group.current) {
+            group.current.children.forEach((child, i) => {
+                if (child.name === 'tentacle') {
+                    child.rotation.z = Math.sin(state.clock.elapsedTime * 2 + i) * 0.2;
+                    child.rotation.x = Math.cos(state.clock.elapsedTime * 1.5 + i) * 0.2;
+                }
+            });
+        }
+    });
+
+    return (
+        <group ref={group}>
+            {/* Body - Black Robe */}
+            <mesh position={[0, 1.2, 0]} castShadow>
+                <cylinderGeometry args={[0.1, 0.6, 2.4, 8]} />
+                <meshStandardMaterial color="black" roughness={0.9} />
+            </mesh>
+            {/* Head - Hood */}
+            <mesh position={[0, 2.3, 0.1]} rotation={[0.2, 0, 0]}>
+                <sphereGeometry args={[0.3, 8, 8]} />
+                <meshStandardMaterial color="#111" />
+            </mesh>
+            <mesh position={[0, 2.3, 0.3]}>
+                <sphereGeometry args={[0.15, 8, 8]} />
+                <meshStandardMaterial color="black" />
+            </mesh>
+            {/* Scythe */}
+            <group position={[0.6, 1.5, 0.4]} rotation={[0, 0, -0.2]}>
+                <mesh position={[0, 0, 0]}>
+                    <cylinderGeometry args={[0.04, 0.04, 2.5, 4]} />
+                    <meshStandardMaterial color="#444" />
+                </mesh>
+                <mesh position={[0, 1.2, 0.4]} rotation={[Math.PI/2, 0, -0.5]}>
+                    <cylinderGeometry args={[0.01, 0.1, 1.2, 4]} />
+                    <meshStandardMaterial color="#aaa" metalness={0.9} />
+                </mesh>
+            </group>
+            {/* Tentacles */}
+            {[...Array(6)].map((_, i) => (
+                <group key={i} name="tentacle" position={[0, 1.8, -0.2]} rotation={[0, (i/6)*Math.PI*2, 0]}>
+                     <mesh position={[0, 0.5, 0.5]} rotation={[-0.5, 0, 0]}>
+                         <cylinderGeometry args={[0.02, 0.08, 1.5, 4]} />
+                         <meshStandardMaterial color="#111" />
+                     </mesh>
+                </group>
+            ))}
+        </group>
+    )
+}
+
+const KnightModel = () => (
+    <group>
+        {/* Horse */}
+        <group position={[0, 0.8, 0]}>
+             {/* Body */}
+             <mesh position={[0, 0, 0]} castShadow>
+                 <boxGeometry args={[0.8, 0.8, 1.6]} />
+                 <meshStandardMaterial color="#5c4033" />
+             </mesh>
+             {/* Neck/Head */}
+             <mesh position={[0, 0.8, 0.6]} rotation={[-0.5, 0, 0]} castShadow>
+                 <boxGeometry args={[0.4, 0.8, 0.5]} />
+                 <meshStandardMaterial color="#5c4033" />
+             </mesh>
+             {/* Legs */}
+             <mesh position={[-0.3, -0.8, 0.6]}> <boxGeometry args={[0.2, 0.8, 0.2]} /> <meshStandardMaterial color="#3f2e3e" /> </mesh>
+             <mesh position={[0.3, -0.8, 0.6]}> <boxGeometry args={[0.2, 0.8, 0.2]} /> <meshStandardMaterial color="#3f2e3e" /> </mesh>
+             <mesh position={[-0.3, -0.8, -0.6]}> <boxGeometry args={[0.2, 0.8, 0.2]} /> <meshStandardMaterial color="#3f2e3e" /> </mesh>
+             <mesh position={[0.3, -0.8, -0.6]}> <boxGeometry args={[0.2, 0.8, 0.2]} /> <meshStandardMaterial color="#3f2e3e" /> </mesh>
+        </group>
+
+        {/* Knight */}
+        <group position={[0, 1.6, 0.2]}>
+             <mesh castShadow>
+                 <cylinderGeometry args={[0.3, 0.3, 0.8, 6]} />
+                 <meshStandardMaterial color="silver" metalness={0.8} />
+             </mesh>
+             <mesh position={[0, 0.6, 0]}>
+                 <boxGeometry args={[0.3, 0.35, 0.3]} />
+                 <meshStandardMaterial color="silver" metalness={0.9} />
+             </mesh>
+             {/* Lance */}
+             <mesh position={[0.4, 0, 0.5]} rotation={[Math.PI/2, 0, 0]}>
+                 <cylinderGeometry args={[0.05, 0.08, 2.5, 6]} />
+                 <meshStandardMaterial color="#ddd" metalness={0.6} />
+             </mesh>
+        </group>
+    </group>
+)
+
+const SupermanModel = () => (
+    <group position={[0, 2, 0]}>
+        <Float speed={2} rotationIntensity={0.2} floatIntensity={0.5}>
+            {/* Body */}
+            <mesh position={[0, 0, 0]} castShadow>
+                <boxGeometry args={[0.5, 0.8, 0.3]} />
+                <meshStandardMaterial color="#2563eb" />
+            </mesh>
+            {/* Legs */}
+            <mesh position={[-0.15, -0.6, 0]}>
+                <cylinderGeometry args={[0.1, 0.1, 0.8, 8]} />
+                <meshStandardMaterial color="#2563eb" />
+            </mesh>
+            <mesh position={[0.15, -0.6, 0]}>
+                <cylinderGeometry args={[0.1, 0.1, 0.8, 8]} />
+                <meshStandardMaterial color="#2563eb" />
+            </mesh>
+            {/* Boots */}
+            <mesh position={[-0.15, -1, 0]}>
+                <boxGeometry args={[0.12, 0.3, 0.15]} />
+                <meshStandardMaterial color="#dc2626" />
+            </mesh>
+             <mesh position={[0.15, -1, 0]}>
+                <boxGeometry args={[0.12, 0.3, 0.15]} />
+                <meshStandardMaterial color="#dc2626" />
+            </mesh>
+            {/* Cape */}
+            <mesh position={[0, -0.2, -0.2]} rotation={[0.2, 0, 0]}>
+                <planeGeometry args={[0.6, 1.2]} />
+                <meshStandardMaterial color="#dc2626" side={THREE.DoubleSide} />
+            </mesh>
+            {/* Head */}
+            <mesh position={[0, 0.6, 0]}>
+                <sphereGeometry args={[0.2, 16, 16]} />
+                <meshStandardMaterial color="#ffedd5" />
+            </mesh>
+            {/* Laser Eyes Indicator */}
+            <mesh position={[0.05, 0.65, 0.15]}>
+                 <sphereGeometry args={[0.03]} />
+                 <meshBasicMaterial color="red" />
+            </mesh>
+             <mesh position={[-0.05, 0.65, 0.15]}>
+                 <sphereGeometry args={[0.03]} />
+                 <meshBasicMaterial color="red" />
+            </mesh>
+        </Float>
+    </group>
+)
+
 
 // 2. MAIN UNIT COMPONENT
-const Unit3D = ({ unit, units, onClick }: { unit: UnitInstance; units: UnitInstance[]; onClick?: () => void }) => {
+const Unit3D = ({ unit, units, onClick, terrain }: { unit: UnitInstance; units: UnitInstance[]; onClick?: () => void; terrain: TerrainType }) => {
   const template = getTemplate(unit.templateId);
   const isRed = unit.team === Team.RED;
   const hpPercent = unit.currentStats.hp / unit.currentStats.maxHp;
@@ -229,49 +369,41 @@ const Unit3D = ({ unit, units, onClick }: { unit: UnitInstance; units: UnitInsta
   useFrame((state) => {
     if (!meshRef.current) return;
     
-    // Lerp position
+    // Lerp position (X, Z)
     meshRef.current.position.x = THREE.MathUtils.lerp(meshRef.current.position.x, unit.position[0], 0.2);
     meshRef.current.position.z = THREE.MathUtils.lerp(meshRef.current.position.z, unit.position[2], 0.2);
     
+    // UPDATE Y BASED ON TERRAIN
+    if (unit.templateId !== 'superman') {
+        const groundHeight = getTerrainHeight(unit.position[0], unit.position[2], terrain);
+        meshRef.current.position.y = groundHeight;
+    } else {
+        // Superman flies above terrain
+        const groundHeight = getTerrainHeight(unit.position[0], unit.position[2], terrain);
+        meshRef.current.position.y = THREE.MathUtils.lerp(meshRef.current.position.y, groundHeight + 0, 0.1); 
+    }
+    
     // ORIENTATION LOGIC
-    let targetLookAt: THREE.Vector3 | null = null;
-
     if (unit.targetId) {
-       // Look at Target
        const target = units.find(u => u.id === unit.targetId);
        if (target) {
-            // Calculate angle to target
             const dx = target.position[0] - unit.position[0];
             const dz = target.position[2] - unit.position[2];
             meshRef.current.rotation.y = Math.atan2(dx, dz);
        }
     } else if (Math.abs(unit.velocity[0]) > 0.01 || Math.abs(unit.velocity[2]) > 0.01) {
-        // Look at movement direction
         const angle = Math.atan2(unit.velocity[0], unit.velocity[2]);
         meshRef.current.rotation.y = angle;
     } else {
-        // Default Orientation (Idle/Setup)
-        // Red (Left) faces +X (Right, angle PI/2)
-        // Blue (Right) faces -X (Left, angle -PI/2)
         const defaultRotation = isRed ? Math.PI / 2 : -Math.PI / 2;
-        
-        // Smoothly rotate to default if not there
-        // Simple lerp for rotation is tricky due to wrapping, just setting it for now is cleaner for setup
         meshRef.current.rotation.y = defaultRotation;
     }
 
     // Walking Animation (Bounce)
     const isMoving = Math.abs(unit.velocity[0]) > 0.01 || Math.abs(unit.velocity[2]) > 0.01;
-    if (isMoving) {
-      meshRef.current.position.y = Math.sin(state.clock.elapsedTime * 15) * 0.1;
-    } else {
-      meshRef.current.position.y = 0;
-    }
-
-    // Attack Shake
-    if (unit.currentCooldown > unit.maxCooldown * 0.8) {
-         meshRef.current.position.x += (Math.random() - 0.5) * 0.1;
-         meshRef.current.position.z += (Math.random() - 0.5) * 0.1;
+    if (isMoving && unit.templateId !== 'superman' && unit.templateId !== 'heavy_tank') {
+      const bounce = Math.sin(state.clock.elapsedTime * 15) * 0.1;
+      meshRef.current.position.y += bounce;
     }
 
     if (unit.isDead) {
@@ -290,6 +422,9 @@ const Unit3D = ({ unit, units, onClick }: { unit: UnitInstance; units: UnitInsta
           case 'paladin': return <PaladinModel color={template.color} />;
           case 'dark_mage': return <MageModel color={template.color} />;
           case 'sniper': return <SniperModel color={template.color} />;
+          case 'grim_reaper': return <GrimReaperModel />;
+          case 'knight': return <KnightModel />;
+          case 'superman': return <SupermanModel />;
           default: return <TrooperModel color={template.color} />;
       }
   };
@@ -297,7 +432,7 @@ const Unit3D = ({ unit, units, onClick }: { unit: UnitInstance; units: UnitInsta
   return (
     <group ref={meshRef} position={[unit.position[0], 0, unit.position[2]]} onClick={onClick}>
       {/* HP Bar */}
-      <group position={[0, template.height + 0.5, 0]} rotation={[0,0,0]}> 
+      <group position={[0, template.height + (unit.templateId === 'superman' ? 2 : 0.5), 0]} rotation={[0,0,0]}> 
         <mesh position={[-0.5 * (1 - hpPercent), 0, 0]}>
           <planeGeometry args={[1.2 * hpPercent, 0.15]} />
           <meshBasicMaterial color={hpPercent > 0.5 ? '#22c55e' : '#ef4444'} side={THREE.DoubleSide} />
@@ -306,11 +441,6 @@ const Unit3D = ({ unit, units, onClick }: { unit: UnitInstance; units: UnitInsta
           <planeGeometry args={[1.25, 0.2]} />
           <meshBasicMaterial color="black" side={THREE.DoubleSide} />
         </mesh>
-        <Float speed={2} rotationIntensity={0} floatIntensity={0.2}>
-             <Text fontSize={0.4} position={[0, 0.4, 0]} color="white" anchorX="center" anchorY="middle" outlineWidth={0.02}>
-                {unit.currentStats.hp.toFixed(0)}
-             </Text>
-        </Float>
       </group>
 
       {/* The Unit Model */}
@@ -339,28 +469,40 @@ type EffectData = {
 const ProjectileSystem = ({ effects, setEffects }: { effects: EffectData[], setEffects: React.Dispatch<React.SetStateAction<EffectData[]>> }) => {
     useFrame((state, delta) => {
         setEffects(prev => {
-            const next = [];
+            if (prev.length === 0) return prev;
+            const next: EffectData[] = [];
+            
             for (const ef of prev) {
-                // Different speeds for different effects
+                // Determine speed
                 let speed = 1.0;
                 if (ef.type === 'bullet') speed = 3.0;
-                if (ef.type === 'laser') speed = 10.0;
-                if (ef.type === 'missile') speed = 0.8;
+                else if (ef.type === 'laser') speed = 10.0;
+                else if (ef.type === 'missile') speed = 0.8;
+                else if (ef.type === 'magic') speed = 2.0;
+                else if (ef.type === 'dark') speed = 2.0;
                 
-                ef.progress += speed * delta;
+                const newProgress = ef.progress + (speed * delta);
                 
-                if (ef.progress < 1 || ef.type === 'explosion') {
-                    if (ef.type === 'explosion') {
-                        // Explosion lives based on progress being effectively "time alive"
-                        // reusing progress > 1 logic to kill it eventually
-                        if (ef.progress < 2) next.push(ef);
-                    } else {
-                        next.push(ef);
+                if (ef.type === 'explosion') {
+                    if (newProgress < 2) {
+                        next.push({ ...ef, progress: newProgress });
                     }
                 } else {
-                    // When projectile hits, maybe spawn explosion
-                    if (ef.type === 'missile') {
-                        next.push({ ...ef, id: Math.random().toString(), type: 'explosion', progress: 0 });
+                    if (newProgress < 1) {
+                        next.push({ ...ef, progress: newProgress });
+                    } else {
+                        // Spawn explosion on hit (Missile or Dark Magic)
+                        if (ef.type === 'missile' || ef.type === 'dark') {
+                            // Explicitly construct the explosion object to avoid TypeScript narrowing issues with spread
+                            next.push({ 
+                                id: Math.random().toString(), 
+                                type: 'explosion', 
+                                from: ef.from, 
+                                to: ef.to, 
+                                color: ef.color, 
+                                progress: 0 
+                            });
+                        }
                     }
                 }
             }
@@ -373,28 +515,26 @@ const ProjectileSystem = ({ effects, setEffects }: { effects: EffectData[], setE
             {effects.map(ef => {
                 if (ef.type === 'explosion') {
                     const scale = ef.progress * 3;
-                    const opacity = 1 - (ef.progress / 2);
+                    const opacity = Math.max(0, 1 - (ef.progress / 2));
                     return (
                         <mesh key={ef.id} position={ef.to}>
-                            <sphereGeometry args={[1, 16, 16]} />
-                            <meshBasicMaterial color="orange" transparent opacity={opacity} />
+                            <sphereGeometry args={[1, 8, 8]} />
+                            <meshBasicMaterial color={ef.color === '#000000' || ef.color === '#7e22ce' ? "purple" : "orange"} transparent opacity={opacity} />
                         </mesh>
                     );
                 }
 
-                // Calculate current position
                 const x = THREE.MathUtils.lerp(ef.from[0], ef.to[0], ef.progress);
                 const y = THREE.MathUtils.lerp(ef.from[1] + 1, ef.to[1] + 1, ef.progress);
                 const z = THREE.MathUtils.lerp(ef.from[2], ef.to[2], ef.progress);
                 
-                // Add Parabola for missile
                 const currentY = ef.type === 'missile' ? y + Math.sin(ef.progress * Math.PI) * 5 : y;
 
                 return (
                     <group key={ef.id} position={[x, currentY, z]}>
                         {ef.type === 'bullet' && (
                              <mesh rotation={[0,0,Math.PI/2]}>
-                                 <capsuleGeometry args={[0.05, 0.5]} />
+                                 <capsuleGeometry args={[0.05, 0.5, 4, 8]} />
                                  <meshBasicMaterial color="#fef08a" />
                              </mesh>
                         )}
@@ -409,8 +549,8 @@ const ProjectileSystem = ({ effects, setEffects }: { effects: EffectData[], setE
                         )}
                         {ef.type === 'laser' && (
                             <mesh rotation={[Math.PI/2, 0, 0]}>
-                                <cylinderGeometry args={[0.05, 0.05, 4]} />
-                                <meshBasicMaterial color="#10b981" transparent opacity={0.6} />
+                                <cylinderGeometry args={[0.05, 0.05, 4, 6]} />
+                                <meshBasicMaterial color="#ef4444" transparent opacity={0.8} />
                             </mesh>
                         )}
                         {ef.type === 'magic' && (
@@ -422,10 +562,10 @@ const ProjectileSystem = ({ effects, setEffects }: { effects: EffectData[], setE
                         )}
                          {ef.type === 'dark' && (
                              <mesh>
-                                 <sphereGeometry args={[0.3]} />
+                                 <sphereGeometry args={[0.3, 8, 8]} />
                                  <meshStandardMaterial color="#000" />
                                  <mesh scale={1.2}>
-                                     <sphereGeometry args={[0.3]} />
+                                     <sphereGeometry args={[0.3, 8, 8]} />
                                      <meshBasicMaterial color={ef.color} transparent opacity={0.3} />
                                  </mesh>
                              </mesh>
@@ -437,59 +577,230 @@ const ProjectileSystem = ({ effects, setEffects }: { effects: EffectData[], setE
     );
 };
 
-// 4. MAP & TERRAIN GENERATION
-const Scenery = ({ terrain }: { terrain: TerrainType }) => {
-    const config = TERRAIN_CONFIG[terrain];
-
-    // Generate random objects based on terrain
-    // FIX: Pre-calculate randomness (including rotation) to avoid jitter on re-render
-    const objects = useMemo(() => {
-        const items = [];
-        const count = 50; // Increased density for larger map
+const SnowEffect = () => {
+    const count = 2000;
+    const mesh = useRef<THREE.Points>(null);
+    
+    const particles = useMemo(() => {
+        const positions = new Float32Array(count * 3);
+        const speeds = new Float32Array(count);
         
         for (let i = 0; i < count; i++) {
-            const x = (Math.random() - 0.5) * ARENA_SIZE * 1.8; // Use more of the map
+            positions[i * 3] = (Math.random() - 0.5) * ARENA_SIZE * 2;
+            positions[i * 3 + 1] = Math.random() * 40;
+            positions[i * 3 + 2] = (Math.random() - 0.5) * ARENA_SIZE * 2;
+            speeds[i] = 0.5 + Math.random() * 2;
+        }
+        
+        return { positions, speeds };
+    }, []);
+
+    useFrame((state, delta) => {
+        if (!mesh.current) return;
+        
+        const positions = mesh.current.geometry.attributes.position.array as Float32Array;
+        
+        for (let i = 0; i < count; i++) {
+            positions[i * 3 + 1] -= particles.speeds[i] * delta * 4;
+            positions[i * 3] += Math.sin(state.clock.elapsedTime + i) * 0.02;
+            
+            if (positions[i * 3 + 1] < 0) {
+                positions[i * 3 + 1] = 40;
+                positions[i * 3] = (Math.random() - 0.5) * ARENA_SIZE * 2;
+                positions[i * 3 + 2] = (Math.random() - 0.5) * ARENA_SIZE * 2;
+            }
+        }
+        
+        mesh.current.geometry.attributes.position.needsUpdate = true;
+    });
+
+    return (
+        <points ref={mesh}>
+            <bufferGeometry>
+                <bufferAttribute
+                    attach="attributes-position"
+                    count={count}
+                    array={particles.positions}
+                    itemSize={3}
+                />
+            </bufferGeometry>
+            <pointsMaterial color="white" size={0.15} transparent opacity={0.8} />
+        </points>
+    );
+}
+
+// 4. MAP & TERRAIN GENERATION MODELS
+
+// --- SCENERY MODELS ---
+const HouseModel = () => (
+    <group>
+        <mesh position={[0, 0.75, 0]} castShadow receiveShadow>
+            <boxGeometry args={[1.5, 1.5, 1.5]} />
+            <meshStandardMaterial color="#fcd34d" />
+        </mesh>
+        <mesh position={[0, 2, 0]} rotation={[0, Math.PI/4, 0]} castShadow>
+             <coneGeometry args={[1.5, 1.5, 4]} />
+             <meshStandardMaterial color="#78350f" />
+        </mesh>
+        <mesh position={[0, 0.5, 0.76]}>
+            <planeGeometry args={[0.5, 1]} />
+            <meshStandardMaterial color="#5c4033" />
+        </mesh>
+    </group>
+);
+
+const BoneModel = () => (
+    <group rotation={[Math.PI/2, 0, 0]}>
+        <mesh position={[0, 0, 0]}>
+            <cylinderGeometry args={[0.1, 0.05, 2, 6]} />
+            <meshStandardMaterial color="#e5e5e5" />
+        </mesh>
+        {[...Array(3)].map((_, i) => (
+            <mesh key={i} position={[0, -0.5 + i * 0.5, 0]} rotation={[0, 0, Math.PI/2]}>
+                 <torusGeometry args={[0.4, 0.05, 4, 8, Math.PI]} />
+                 <meshStandardMaterial color="#e5e5e5" />
+            </mesh>
+        ))}
+    </group>
+);
+
+const XmasTreeModel = () => (
+    <group>
+        <mesh position={[0, 0.5, 0]} castShadow>
+             <cylinderGeometry args={[0.2, 0.3, 1, 6]} />
+             <meshStandardMaterial color="#3f2e3e" />
+        </mesh>
+        <mesh position={[0, 1.5, 0]} castShadow>
+             <coneGeometry args={[1.2, 1.5, 8]} />
+             <meshStandardMaterial color="#064e3b" />
+        </mesh>
+        <mesh position={[0, 2.5, 0]} castShadow>
+             <coneGeometry args={[1, 1.5, 8]} />
+             <meshStandardMaterial color="#065f46" />
+        </mesh>
+        <mesh position={[0, 3.5, 0]} castShadow>
+             <coneGeometry args={[0.7, 1.5, 8]} />
+             <meshStandardMaterial color="#047857" />
+        </mesh>
+        <mesh position={[0, 4.3, 0]}>
+             <dodecahedronGeometry args={[0.2]} />
+             <meshBasicMaterial color="yellow" />
+        </mesh>
+        {[...Array(6)].map((_, i) => (
+             <mesh key={i} position={[Math.sin(i)*0.6, 2 + (i%2)*0.8, Math.cos(i)*0.6]}>
+                 <sphereGeometry args={[0.1, 6, 6]} />
+                 <meshStandardMaterial color={i % 2 === 0 ? "red" : "gold"} />
+             </mesh>
+        ))}
+    </group>
+);
+
+const GiftModel = ({ color }: { color: string }) => (
+    <group>
+        <mesh position={[0, 0.3, 0]}>
+            <boxGeometry args={[0.6, 0.6, 0.6]} />
+            <meshStandardMaterial color={color} />
+        </mesh>
+        <mesh position={[0, 0.3, 0]}>
+            <boxGeometry args={[0.62, 0.1, 0.62]} />
+            <meshStandardMaterial color="gold" />
+        </mesh>
+        <mesh position={[0, 0.3, 0]}>
+            <boxGeometry args={[0.1, 0.62, 0.62]} />
+            <meshStandardMaterial color="gold" />
+        </mesh>
+    </group>
+);
+
+const SkullModel = () => (
+    <group>
+        <mesh position={[0, 0.5, 0]} castShadow>
+            <sphereGeometry args={[0.4, 8, 8]} />
+            <meshStandardMaterial color="#d4d4d4" />
+        </mesh>
+        <mesh position={[0, 0.2, 0.1]} castShadow>
+             <boxGeometry args={[0.3, 0.2, 0.3]} />
+             <meshStandardMaterial color="#a3a3a3" />
+        </mesh>
+        <mesh position={[0.15, 0.55, 0.35]}>
+            <sphereGeometry args={[0.08, 6, 6]} />
+            <meshBasicMaterial color="#4ade80" />
+            <pointLight distance={1} intensity={2} color="#4ade80" decay={2} />
+        </mesh>
+        <mesh position={[-0.15, 0.55, 0.35]}>
+            <sphereGeometry args={[0.08, 6, 6]} />
+            <meshBasicMaterial color="#4ade80" />
+            <pointLight distance={1} intensity={2} color="#4ade80" decay={2} />
+        </mesh>
+    </group>
+);
+
+const Scenery = React.memo(({ terrain }: { terrain: TerrainType }) => {
+    const objects = useMemo(() => {
+        const items = [];
+        const count = 50; 
+        
+        for (let i = 0; i < count; i++) {
+            const x = (Math.random() - 0.5) * ARENA_SIZE * 1.8; 
             const z = (Math.random() - 0.5) * ARENA_SIZE * 1.8;
             const scale = 0.5 + Math.random() * 1.5;
-            
-            // Avoid exact center spawn to keep battle lanes somewhat clear
+            const y = getTerrainHeight(x, z, terrain);
+
             if (Math.abs(x) < 5 && Math.abs(z) < 5) continue;
 
             let type = 'rock';
-            if (terrain === TerrainType.GRASS && Math.random() > 0.3) type = 'tree';
-            if (terrain === TerrainType.DESERT && Math.random() > 0.6) type = 'cactus';
-            if (terrain === TerrainType.VOLCANIC) type = 'spire';
+            let color = '';
+
+            if (terrain === TerrainType.GRASS) {
+                 const rand = Math.random();
+                 if (rand > 0.8) type = 'house';
+                 else if (rand > 0.4) type = 'tree';
+            }
+            if (terrain === TerrainType.DESERT) {
+                const rand = Math.random();
+                if (rand > 0.85) type = 'bones';
+                else if (rand > 0.5) type = 'cactus';
+            }
+            if (terrain === TerrainType.SNOW) {
+                const rand = Math.random();
+                if (rand > 0.85) {
+                    type = 'gift';
+                    color = Math.random() > 0.5 ? "#ef4444" : "#3b82f6";
+                }
+                else if (rand > 0.4) type = 'xmas_tree';
+                else type = 'rock';
+            }
+            if (terrain === TerrainType.VOLCANIC) {
+                const rand = Math.random();
+                if (rand > 0.7) type = 'skull';
+                else type = 'spire';
+            }
             
-            // Store random rotation in the object data
             const rotation: [number, number, number] = [0, Math.random() * Math.PI * 2, 0];
-            if (type === 'rock') {
+            
+            if (type === 'bones') {
+                rotation[0] = 0; 
+                rotation[1] = Math.random() * Math.PI * 2;
+                rotation[2] = 0;
+            } else if (type === 'rock') {
                 rotation[0] = Math.random() * Math.PI;
                 rotation[1] = Math.random() * Math.PI;
             }
-
-            items.push({ id: i, x, z, scale, type, rotation });
+            
+            items.push({ id: i, x, y, z, scale, type, rotation, color });
         }
         return items;
     }, [terrain]);
 
     return (
         <group>
-            {/* Ground */}
-            <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.05, 0]} receiveShadow>
-                <planeGeometry args={[ARENA_SIZE * 2, ARENA_SIZE * 2]} />
-                <meshStandardMaterial color={config.groundColor} />
-            </mesh>
-            <gridHelper args={[ARENA_SIZE * 2, ARENA_SIZE, '#ffffff', '#ffffff']} position={[0, 0, 0]}>
-                <lineBasicMaterial attach="material" color="#ffffff" transparent opacity={0.05} />
-            </gridHelper>
-
-            {/* Objects */}
+            <GroundMesh terrain={terrain} />
             {objects.map(obj => (
-                <group key={obj.id} position={[obj.x, 0, obj.z]} scale={obj.scale} rotation={obj.rotation as any}>
+                <group key={obj.id} position={[obj.x, obj.y, obj.z]} scale={obj.scale} rotation={new THREE.Euler(...obj.rotation)}>
                     {obj.type === 'tree' && (
                         <group>
                              <mesh position={[0, 1, 0]} castShadow>
-                                 <cylinderGeometry args={[0.2, 0.3, 2]} />
+                                 <cylinderGeometry args={[0.2, 0.3, 2, 6]} />
                                  <meshStandardMaterial color="#5c4033" />
                              </mesh>
                              <mesh position={[0, 2.5, 0]} castShadow>
@@ -504,29 +815,34 @@ const Scenery = ({ terrain }: { terrain: TerrainType }) => {
                              <meshStandardMaterial color="#57534e" />
                          </mesh>
                     )}
+                    {obj.type === 'house' && <HouseModel />}
                     {obj.type === 'cactus' && (
                         <group>
                              <mesh position={[0, 1, 0]} castShadow>
-                                 <capsuleGeometry args={[0.3, 2]} />
+                                 <capsuleGeometry args={[0.3, 2, 4, 8]} />
                                  <meshStandardMaterial color="#166534" />
                              </mesh>
                              <mesh position={[0.4, 1.2, 0]} rotation={[0,0,-0.5]} castShadow>
-                                 <capsuleGeometry args={[0.2, 0.8]} />
+                                 <capsuleGeometry args={[0.2, 0.8, 4, 8]} />
                                  <meshStandardMaterial color="#166534" />
                              </mesh>
                         </group>
                     )}
+                    {obj.type === 'bones' && <BoneModel />}
+                    {obj.type === 'xmas_tree' && <XmasTreeModel />}
+                    {obj.type === 'gift' && <GiftModel color={obj.color} />}
                     {obj.type === 'spire' && (
                          <mesh position={[0, 1.5, 0]} castShadow>
                              <coneGeometry args={[0.4, 3, 4]} />
                              <meshStandardMaterial color="#7f1d1d" />
                          </mesh>
                     )}
+                    {obj.type === 'skull' && <SkullModel />}
                 </group>
             ))}
         </group>
     );
-};
+});
 
 const Atmosphere = ({ terrain }: { terrain: TerrainType }) => {
     return (
@@ -551,6 +867,7 @@ const Atmosphere = ({ terrain }: { terrain: TerrainType }) => {
                     <Environment preset="dawn" background={false} />
                     <ambientLight intensity={0.7} />
                     <fog attach="fog" args={['#e2e8f0', 10, 90]} />
+                    <SnowEffect />
                 </>
             )}
             {terrain === TerrainType.VOLCANIC && (
@@ -558,8 +875,8 @@ const Atmosphere = ({ terrain }: { terrain: TerrainType }) => {
                     <color attach="background" args={['#1a0505']} />
                     <fog attach="fog" args={['#1a0505', 5, 80]} />
                     <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
-                    <ambientLight intensity={0.2} />
-                    <directionalLight position={[0, 10, 0]} intensity={1} color="red" />
+                    <ambientLight intensity={0.5} color="#7f1d1d" />
+                    <directionalLight position={[0, 20, 0]} intensity={1} color="#f97316" />
                 </>
             )}
         </>
@@ -570,8 +887,6 @@ const Atmosphere = ({ terrain }: { terrain: TerrainType }) => {
 // --- MAIN SCENE ---
 
 interface BattleSceneProps {
-  units: UnitInstance[];
-  setUnits: React.Dispatch<React.SetStateAction<UnitInstance[]>>;
   phase: GamePhase;
   setPhase: (p: GamePhase) => void;
   terrain: TerrainType;
@@ -580,11 +895,10 @@ interface BattleSceneProps {
   budgets: Record<Team, number>;
   decreaseBudget: (amount: number) => void;
   setWinner: (w: Team) => void;
+  onTeamStatusChange: (hasRed: boolean, hasBlue: boolean) => void;
 }
 
 export const BattleScene: React.FC<BattleSceneProps> = ({
-  units,
-  setUnits,
   phase,
   setPhase,
   terrain,
@@ -592,11 +906,18 @@ export const BattleScene: React.FC<BattleSceneProps> = ({
   selectedTeam,
   budgets,
   decreaseBudget,
-  setWinner
+  setWinner,
+  onTeamStatusChange
 }) => {
+  const [units, setUnits] = useState<UnitInstance[]>([]);
   const [effects, setEffects] = useState<EffectData[]>([]);
 
-  // --- PHYSICS & LOGIC LOOP ---
+  useEffect(() => {
+    const hasRed = units.some(u => u.team === Team.RED);
+    const hasBlue = units.some(u => u.team === Team.BLUE);
+    onTeamStatusChange(hasRed, hasBlue);
+  }, [units, onTeamStatusChange]);
+
   useFrame((state, delta) => {
     if (phase !== GamePhase.BATTLE) return;
 
@@ -606,7 +927,6 @@ export const BattleScene: React.FC<BattleSceneProps> = ({
       let hasBlue = false;
       const newEffects: EffectData[] = [];
 
-      // 1. Identify Logic & Targets
       nextUnits.forEach(unit => {
         if (unit.isDead) return;
         if (unit.team === Team.RED) hasRed = true;
@@ -640,7 +960,6 @@ export const BattleScene: React.FC<BattleSceneProps> = ({
             const range = unit.currentStats.range;
 
             if (dist <= range) {
-                // ATTACK
                 if (unit.currentCooldown <= 0) {
                     unit.currentCooldown = unit.maxCooldown;
                     
@@ -650,15 +969,14 @@ export const BattleScene: React.FC<BattleSceneProps> = ({
                         target.isDead = true;
                     }
 
-                    // DETERMINE VISUAL EFFECT
                     let vfxType: EffectData['type'] = 'bullet';
                     if (unit.templateId === 'heavy_tank') vfxType = 'missile';
-                    if (unit.templateId === 'sniper') vfxType = 'laser';
+                    if (unit.templateId === 'sniper' || unit.templateId === 'superman') vfxType = 'laser';
                     if (unit.templateId === 'paladin') vfxType = 'magic';
-                    if (unit.templateId === 'dark_mage') vfxType = 'dark';
-                    if (unit.templateId === 'berserker') vfxType = 'bullet'; 
+                    if (unit.templateId === 'dark_mage' || unit.templateId === 'grim_reaper') vfxType = 'dark';
+                    if (unit.templateId === 'berserker' || unit.templateId === 'knight') vfxType = 'bullet'; 
 
-                    if (unit.templateId !== 'berserker') {
+                    if (unit.templateId !== 'berserker' && unit.templateId !== 'knight' && unit.templateId !== 'grim_reaper') {
                          newEffects.push({
                             id: Math.random().toString(),
                             type: vfxType,
@@ -670,7 +988,6 @@ export const BattleScene: React.FC<BattleSceneProps> = ({
                     }
                 }
             } else {
-                // MOVE
                 const dx = target.position[0] - unit.position[0];
                 const dz = target.position[2] - unit.position[2];
                 const length = Math.sqrt(dx * dx + dz * dz);
@@ -683,17 +1000,13 @@ export const BattleScene: React.FC<BattleSceneProps> = ({
         }
       });
 
-      // 2. Resolve Movement & Collision
       nextUnits.forEach((unit, i) => {
           if (unit.isDead) return;
 
           unit.position[0] += unit.velocity[0];
           unit.position[2] += unit.velocity[2];
 
-          // FIX: Expand boundary to full arena size (ARENA_SIZE represents half-width of coordinate system if 0 is center)
-          // Since ARENA_SIZE in constants is 80, the grid is 160x160.
-          // Coordinates range from -80 to 80.
-          const boundary = ARENA_SIZE - 2; // Leave small buffer
+          const boundary = ARENA_SIZE - 2; 
           unit.position[0] = Math.max(-boundary, Math.min(boundary, unit.position[0]));
           unit.position[2] = Math.max(-boundary, Math.min(boundary, unit.position[2]));
 
@@ -714,7 +1027,6 @@ export const BattleScene: React.FC<BattleSceneProps> = ({
           });
       });
 
-      // 3. Check Win Condition
       if (!hasRed && hasBlue) {
           setPhase(GamePhase.GAME_OVER);
           setWinner(Team.BLUE);
@@ -740,8 +1052,6 @@ export const BattleScene: React.FC<BattleSceneProps> = ({
 
     const point = e.point;
     
-    // FIX: Relax placement restrictions to allow full map usage, but keep sides separate
-    // Center is 0. Negative X is Red, Positive X is Blue.
     if (selectedTeam === Team.RED && point.x > 0) {
         alert("Red team must place on the Left side!");
         return;
@@ -772,8 +1082,6 @@ export const BattleScene: React.FC<BattleSceneProps> = ({
   return (
     <>
       <OrbitControls makeDefault minDistance={20} maxDistance={120} maxPolarAngle={Math.PI / 2.2} />
-      
-      {/* Dynamic Sky and Atmosphere */}
       <Atmosphere terrain={terrain} />
 
       <directionalLight 
@@ -787,27 +1095,25 @@ export const BattleScene: React.FC<BattleSceneProps> = ({
         shadow-camera-bottom={-80}
       />
 
-      {/* Render Scenery based on terrain */}
       <Scenery terrain={terrain} />
 
-      {/* Invisible Plane for Clicking - Size must match ARENA_SIZE */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.01, 0]} onClick={handleGroundClick} visible={false}>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 5, 0]} onClick={handleGroundClick} visible={false}>
             <planeGeometry args={[ARENA_SIZE * 2, ARENA_SIZE * 2]} />
       </mesh>
 
       {units.map(unit => (
-        <Unit3D key={unit.id} unit={unit} units={units} />
+        <Unit3D key={unit.id} unit={unit} units={units} terrain={terrain} />
       ))}
 
       <ProjectileSystem effects={effects} setEffects={setEffects} />
       
       {phase === GamePhase.SETUP && (
           <group position={[0, 0.1, 0]}>
-              <mesh position={[-ARENA_SIZE/2, 0, 0]} rotation={[-Math.PI/2, 0, 0]}>
+              <mesh position={[-ARENA_SIZE/2, 5, 0]} rotation={[-Math.PI/2, 0, 0]}>
                   <planeGeometry args={[ARENA_SIZE, ARENA_SIZE * 2]} />
                   <meshBasicMaterial color="red" opacity={0.05} transparent side={THREE.DoubleSide} />
               </mesh>
-               <mesh position={[ARENA_SIZE/2, 0, 0]} rotation={[-Math.PI/2, 0, 0]}>
+               <mesh position={[ARENA_SIZE/2, 5, 0]} rotation={[-Math.PI/2, 0, 0]}>
                   <planeGeometry args={[ARENA_SIZE, ARENA_SIZE * 2]} />
                   <meshBasicMaterial color="blue" opacity={0.05} transparent side={THREE.DoubleSide} />
               </mesh>
