@@ -1,7 +1,7 @@
 import { AttackType, TerrainType, UnitTemplate } from './types';
 
 export const INITIAL_BUDGET = 5000;
-export const ARENA_SIZE = 40;
+export const ARENA_SIZE = 80;
 
 export const TERRAIN_CONFIG = {
   [TerrainType.GRASS]: { color: '#4ade80', groundColor: '#14532d', accent: '#166534' },

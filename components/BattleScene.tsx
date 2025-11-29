@@ -1,6 +1,6 @@
 import React, { useRef, useMemo, useState, useEffect } from 'react';
 import { Canvas, useFrame, ThreeEvent } from '@react-three/fiber';
-import { OrbitControls, Environment, SoftShadows, ContactShadows, Text, Float, Trail, Stars } from '@react-three/drei';
+import { OrbitControls, Environment, SoftShadows, ContactShadows, Text, Float, Trail, Stars, Sky } from '@react-three/drei';
 import * as THREE from 'three';
 import { UnitInstance, UnitTemplate, Team, GamePhase, TerrainType, AttackType } from '../types';
 import { UNIT_TEMPLATES, ARENA_SIZE, TERRAIN_CONFIG } from '../constants';
@@ -25,6 +25,7 @@ declare global {
       dodecahedronGeometry: any;
       torusGeometry: any;
       lineBasicMaterial: any;
+      fog: any;
     }
   }
 }
@@ -219,7 +220,7 @@ const SniperModel = ({ color }: { color: string }) => (
 
 
 // 2. MAIN UNIT COMPONENT
-const Unit3D = ({ unit, onClick }: { unit: UnitInstance; onClick?: () => void }) => {
+const Unit3D = ({ unit, units, onClick }: { unit: UnitInstance; units: UnitInstance[]; onClick?: () => void }) => {
   const template = getTemplate(unit.templateId);
   const isRed = unit.team === Team.RED;
   const hpPercent = unit.currentStats.hp / unit.currentStats.maxHp;
@@ -232,14 +233,31 @@ const Unit3D = ({ unit, onClick }: { unit: UnitInstance; onClick?: () => void })
     meshRef.current.position.x = THREE.MathUtils.lerp(meshRef.current.position.x, unit.position[0], 0.2);
     meshRef.current.position.z = THREE.MathUtils.lerp(meshRef.current.position.z, unit.position[2], 0.2);
     
-    // Look at target or movement direction
+    // ORIENTATION LOGIC
+    let targetLookAt: THREE.Vector3 | null = null;
+
     if (unit.targetId) {
-       // We can't easily get target position here without passing all units, 
-       // but we can assume velocity direction is mostly towards target if moving
-       if (Math.abs(unit.velocity[0]) > 0.01 || Math.abs(unit.velocity[2]) > 0.01) {
-          const angle = Math.atan2(unit.velocity[0], unit.velocity[2]);
-          meshRef.current.rotation.y = angle;
+       // Look at Target
+       const target = units.find(u => u.id === unit.targetId);
+       if (target) {
+            // Calculate angle to target
+            const dx = target.position[0] - unit.position[0];
+            const dz = target.position[2] - unit.position[2];
+            meshRef.current.rotation.y = Math.atan2(dx, dz);
        }
+    } else if (Math.abs(unit.velocity[0]) > 0.01 || Math.abs(unit.velocity[2]) > 0.01) {
+        // Look at movement direction
+        const angle = Math.atan2(unit.velocity[0], unit.velocity[2]);
+        meshRef.current.rotation.y = angle;
+    } else {
+        // Default Orientation (Idle/Setup)
+        // Red (Left) faces +X (Right, angle PI/2)
+        // Blue (Right) faces -X (Left, angle -PI/2)
+        const defaultRotation = isRed ? Math.PI / 2 : -Math.PI / 2;
+        
+        // Smoothly rotate to default if not there
+        // Simple lerp for rotation is tricky due to wrapping, just setting it for now is cleaner for setup
+        meshRef.current.rotation.y = defaultRotation;
     }
 
     // Walking Animation (Bounce)
@@ -424,16 +442,17 @@ const Scenery = ({ terrain }: { terrain: TerrainType }) => {
     const config = TERRAIN_CONFIG[terrain];
 
     // Generate random objects based on terrain
+    // FIX: Pre-calculate randomness (including rotation) to avoid jitter on re-render
     const objects = useMemo(() => {
         const items = [];
-        const count = 30; // Number of obstacles
+        const count = 50; // Increased density for larger map
         
         for (let i = 0; i < count; i++) {
-            const x = (Math.random() - 0.5) * ARENA_SIZE * 0.9;
-            const z = (Math.random() - 0.5) * ARENA_SIZE * 0.9;
+            const x = (Math.random() - 0.5) * ARENA_SIZE * 1.8; // Use more of the map
+            const z = (Math.random() - 0.5) * ARENA_SIZE * 1.8;
             const scale = 0.5 + Math.random() * 1.5;
             
-            // Avoid center spawn
+            // Avoid exact center spawn to keep battle lanes somewhat clear
             if (Math.abs(x) < 5 && Math.abs(z) < 5) continue;
 
             let type = 'rock';
@@ -441,7 +460,14 @@ const Scenery = ({ terrain }: { terrain: TerrainType }) => {
             if (terrain === TerrainType.DESERT && Math.random() > 0.6) type = 'cactus';
             if (terrain === TerrainType.VOLCANIC) type = 'spire';
             
-            items.push({ id: i, x, z, scale, type });
+            // Store random rotation in the object data
+            const rotation: [number, number, number] = [0, Math.random() * Math.PI * 2, 0];
+            if (type === 'rock') {
+                rotation[0] = Math.random() * Math.PI;
+                rotation[1] = Math.random() * Math.PI;
+            }
+
+            items.push({ id: i, x, z, scale, type, rotation });
         }
         return items;
     }, [terrain]);
@@ -459,7 +485,7 @@ const Scenery = ({ terrain }: { terrain: TerrainType }) => {
 
             {/* Objects */}
             {objects.map(obj => (
-                <group key={obj.id} position={[obj.x, 0, obj.z]} scale={obj.scale}>
+                <group key={obj.id} position={[obj.x, 0, obj.z]} scale={obj.scale} rotation={obj.rotation as any}>
                     {obj.type === 'tree' && (
                         <group>
                              <mesh position={[0, 1, 0]} castShadow>
@@ -473,7 +499,7 @@ const Scenery = ({ terrain }: { terrain: TerrainType }) => {
                         </group>
                     )}
                     {obj.type === 'rock' && (
-                         <mesh position={[0, 0.5, 0]} castShadow rotation={[Math.random(), Math.random(), 0]}>
+                         <mesh position={[0, 0.5, 0]} castShadow>
                              <dodecahedronGeometry args={[0.8]} />
                              <meshStandardMaterial color="#57534e" />
                          </mesh>
@@ -501,6 +527,44 @@ const Scenery = ({ terrain }: { terrain: TerrainType }) => {
         </group>
     );
 };
+
+const Atmosphere = ({ terrain }: { terrain: TerrainType }) => {
+    return (
+        <>
+            {terrain === TerrainType.GRASS && (
+                <>
+                    <Sky sunPosition={[100, 20, 100]} turbidity={8} rayleigh={0.6} />
+                    <Environment preset="park" background={false} />
+                    <ambientLight intensity={0.5} />
+                </>
+            )}
+            {terrain === TerrainType.DESERT && (
+                <>
+                    <Sky sunPosition={[100, 10, 0]} turbidity={15} rayleigh={0.2} mieCoefficient={0.005} mieDirectionalG={0.8} />
+                    <Environment preset="sunset" background={false} />
+                    <ambientLight intensity={0.6} />
+                </>
+            )}
+            {terrain === TerrainType.SNOW && (
+                <>
+                    <Sky sunPosition={[0, 5, -100]} turbidity={20} rayleigh={0.2} />
+                    <Environment preset="dawn" background={false} />
+                    <ambientLight intensity={0.7} />
+                    <fog attach="fog" args={['#e2e8f0', 10, 90]} />
+                </>
+            )}
+            {terrain === TerrainType.VOLCANIC && (
+                <>
+                    <color attach="background" args={['#1a0505']} />
+                    <fog attach="fog" args={['#1a0505', 5, 80]} />
+                    <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
+                    <ambientLight intensity={0.2} />
+                    <directionalLight position={[0, 10, 0]} intensity={1} color="red" />
+                </>
+            )}
+        </>
+    )
+}
 
 
 // --- MAIN SCENE ---
@@ -592,7 +656,7 @@ export const BattleScene: React.FC<BattleSceneProps> = ({
                     if (unit.templateId === 'sniper') vfxType = 'laser';
                     if (unit.templateId === 'paladin') vfxType = 'magic';
                     if (unit.templateId === 'dark_mage') vfxType = 'dark';
-                    if (unit.templateId === 'berserker') vfxType = 'bullet'; // No visual projectile really, maybe just hit
+                    if (unit.templateId === 'berserker') vfxType = 'bullet'; 
 
                     if (unit.templateId !== 'berserker') {
                          newEffects.push({
@@ -626,7 +690,10 @@ export const BattleScene: React.FC<BattleSceneProps> = ({
           unit.position[0] += unit.velocity[0];
           unit.position[2] += unit.velocity[2];
 
-          const boundary = ARENA_SIZE / 2 - 1;
+          // FIX: Expand boundary to full arena size (ARENA_SIZE represents half-width of coordinate system if 0 is center)
+          // Since ARENA_SIZE in constants is 80, the grid is 160x160.
+          // Coordinates range from -80 to 80.
+          const boundary = ARENA_SIZE - 2; // Leave small buffer
           unit.position[0] = Math.max(-boundary, Math.min(boundary, unit.position[0]));
           unit.position[2] = Math.max(-boundary, Math.min(boundary, unit.position[2]));
 
@@ -657,7 +724,7 @@ export const BattleScene: React.FC<BattleSceneProps> = ({
       }
 
       if (newEffects.length > 0) {
-          setEffects(prev => [...prev, ...newEffects].slice(-30));
+          setEffects(prev => [...prev, ...newEffects].slice(-50));
       }
 
       return [...nextUnits];
@@ -673,11 +740,13 @@ export const BattleScene: React.FC<BattleSceneProps> = ({
 
     const point = e.point;
     
-    if (selectedTeam === Team.RED && point.x > -2) {
+    // FIX: Relax placement restrictions to allow full map usage, but keep sides separate
+    // Center is 0. Negative X is Red, Positive X is Blue.
+    if (selectedTeam === Team.RED && point.x > 0) {
         alert("Red team must place on the Left side!");
         return;
     }
-    if (selectedTeam === Team.BLUE && point.x < 2) {
+    if (selectedTeam === Team.BLUE && point.x < 0) {
         alert("Blue team must place on the Right side!");
         return;
     }
@@ -702,45 +771,45 @@ export const BattleScene: React.FC<BattleSceneProps> = ({
 
   return (
     <>
-      <OrbitControls makeDefault minDistance={10} maxDistance={60} maxPolarAngle={Math.PI / 2.2} />
-      <Environment preset={terrain === TerrainType.SNOW ? 'dawn' : terrain === TerrainType.DESERT ? 'sunset' : 'park'} background blur={0.6} />
-      <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
+      <OrbitControls makeDefault minDistance={20} maxDistance={120} maxPolarAngle={Math.PI / 2.2} />
       
-      <ambientLight intensity={0.4} />
+      {/* Dynamic Sky and Atmosphere */}
+      <Atmosphere terrain={terrain} />
+
       <directionalLight 
-        position={[20, 30, 10]} 
-        intensity={1.2} 
+        position={[40, 60, 20]} 
+        intensity={1.5} 
         castShadow 
         shadow-mapSize={[2048, 2048]} 
-        shadow-camera-left={-30}
-        shadow-camera-right={30}
-        shadow-camera-top={30}
-        shadow-camera-bottom={-30}
+        shadow-camera-left={-80}
+        shadow-camera-right={80}
+        shadow-camera-top={80}
+        shadow-camera-bottom={-80}
       />
 
       {/* Render Scenery based on terrain */}
       <Scenery terrain={terrain} />
 
-      {/* Invisible Plane for Clicking */}
+      {/* Invisible Plane for Clicking - Size must match ARENA_SIZE */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.01, 0]} onClick={handleGroundClick} visible={false}>
             <planeGeometry args={[ARENA_SIZE * 2, ARENA_SIZE * 2]} />
       </mesh>
 
       {units.map(unit => (
-        <Unit3D key={unit.id} unit={unit} />
+        <Unit3D key={unit.id} unit={unit} units={units} />
       ))}
 
       <ProjectileSystem effects={effects} setEffects={setEffects} />
       
       {phase === GamePhase.SETUP && (
           <group position={[0, 0.1, 0]}>
-              <mesh position={[-ARENA_SIZE/4, 0, 0]} rotation={[-Math.PI/2, 0, 0]}>
-                  <planeGeometry args={[ARENA_SIZE/2 - 2, ARENA_SIZE]} />
-                  <meshBasicMaterial color="red" opacity={0.1} transparent side={THREE.DoubleSide} />
+              <mesh position={[-ARENA_SIZE/2, 0, 0]} rotation={[-Math.PI/2, 0, 0]}>
+                  <planeGeometry args={[ARENA_SIZE, ARENA_SIZE * 2]} />
+                  <meshBasicMaterial color="red" opacity={0.05} transparent side={THREE.DoubleSide} />
               </mesh>
-               <mesh position={[ARENA_SIZE/4, 0, 0]} rotation={[-Math.PI/2, 0, 0]}>
-                  <planeGeometry args={[ARENA_SIZE/2 - 2, ARENA_SIZE]} />
-                  <meshBasicMaterial color="blue" opacity={0.1} transparent side={THREE.DoubleSide} />
+               <mesh position={[ARENA_SIZE/2, 0, 0]} rotation={[-Math.PI/2, 0, 0]}>
+                  <planeGeometry args={[ARENA_SIZE, ARENA_SIZE * 2]} />
+                  <meshBasicMaterial color="blue" opacity={0.05} transparent side={THREE.DoubleSide} />
               </mesh>
           </group>
       )}
